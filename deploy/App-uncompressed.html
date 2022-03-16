@@ -1,0 +1,1300 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>2D Matrix Grid</title>
+
+    <script type="text/javascript" src="/apps/2.1/sdk.js"></script>
+
+    <script type="text/javascript">
+        Rally.onReady(function () {
+                /**
+ * A link that pops up a version dialog box
+ */
+
+Ext.define('Rally.technicalservices.InfoLink',{
+    extend: 'Rally.ui.dialog.Dialog',
+    alias: 'widget.tsinfolink',
+    
+    /**
+     * @cfg {String} informationHtml
+     * Additional text to be displayed on the popup dialog (for exmaple,
+     * to add a description of the app's use or functionality)
+     */
+    informationHtml: null,
+    
+    /**
+     * 
+     * cfg {String} title
+     * The title for the dialog box
+     */
+    title: "Build Information",
+    
+    defaults: { padding: 5, margin: 5 },
+
+    closable: true,
+     
+    draggable: true,
+
+    autoShow: true,
+   
+    width: 350, 
+    
+    initComponent: function() {
+        var id = Ext.id(this);
+        this.title =  "<span class='icon-help'> </span>" + this.title;
+        this.callParent(arguments);
+    },
+    
+    _generateChecksum: function(string){
+        var chk = 0x12345678,
+            i;
+        string = string.replace(/var CHECKSUM = .*;/,"");
+        string = string.replace(/\s/g,"");  //Remove all whitespace from the string.
+        
+        for (i = 0; i < string.length; i++) {
+            chk += (string.charCodeAt(i) * i);
+        }
+    
+        return chk;
+    },
+    
+    _checkChecksum: function(container) {
+        var deferred = Ext.create('Deft.Deferred');
+        console.log("_checkChecksum", container);
+        var me = this;
+        
+        Ext.Ajax.request({
+            url: document.URL,
+            params: {
+                id: 1
+            },
+            success: function (response) {
+                text = response.responseText;
+                if ( CHECKSUM ) {
+                    if ( CHECKSUM !== me._generateChecksum(text) ) {
+                        console.log("Checksums don't match!");
+                        deferred.resolve(false);
+                        return;
+                    }
+                }
+                deferred.resolve(true);
+            }
+        });
+        
+        return deferred.promise;
+    },
+    
+    afterRender: function() {
+        var app = Rally.getApp();
+        
+        if (! app.isExternal() ) {
+                
+            this._checkChecksum(app).then({
+                scope: this,
+                success: function(result){
+                    if ( !result ) {
+                        this.addDocked({
+                            xtype:'container',
+                            cls: 'build-info',
+                            padding: 2,
+                            html:'<span class="icon-warning"> </span>Checksums do not match'
+                        });
+                    }
+                },
+                failure: function(msg){
+                    console.log("oops:",msg);
+                }
+            });
+        } else {
+            this.addDocked({
+                xtype:'container',
+                cls: 'build-info',
+                padding: 2,
+                html:'... Running externally'
+            });
+        }
+        this.callParent(arguments);
+    },
+    
+    beforeRender: function() {
+        var me = this;
+        this.callParent(arguments);
+
+        if (this.informationHtml) {
+            this.addDocked({
+                xtype: 'component',
+                componentCls: 'intro-panel',
+                padding: 2,
+                html: this.informationHtml
+            });
+        }
+        
+        this.addDocked({
+            xtype:'container',
+            cls: 'build-info',
+            padding: 2,
+            html:"This app was created by the Rally Technical Services Team."
+        });
+        
+        if ( APP_BUILD_DATE ) {
+            this.addDocked({
+                xtype:'container',
+                cls: 'build-info',
+                padding: 2,
+                html:'Build date/time: ' + APP_BUILD_DATE
+            });
+        }
+    }
+});
+
+                /*
+ */
+Ext.define('Rally.technicalservices.Logger',{
+    constructor: function(config){
+        Ext.apply(this,config);
+    },
+    log: function(args){
+        var timestamp = "[ " + Ext.util.Format.date(new Date(), "Y-m-d H:i:s.u") + " ]";
+        //var output_args = arguments;
+        //output_args.unshift( [ "[ " + timestamp + " ]" ] );
+        //output_args = Ext.Array.push(output_args,arguments);
+        
+        var output_args = [];
+        output_args = Ext.Array.push(output_args,[timestamp]);
+        output_args = Ext.Array.push(output_args, Ext.Array.slice(arguments,0));
+
+        if(window.console) {
+            console.log.apply(console,output_args);
+        }
+    }
+});
+
+                Ext.define("2d-matrix-grid", {
+    extend: 'Rally.app.App',
+    componentCls: 'app',
+    logger: new Rally.technicalservices.Logger(),
+    defaults: { margin: 10 },
+    items: [
+        {xtype:'container',itemId:'message_box',tpl:'Hello, <tpl>{_refObjectName}</tpl>'},
+        {xtype:'container',itemId:'display_box'}
+    ],
+    config: {
+        defaultSettings: {
+            modelName: 'Defect',
+            xAxisField: 'Severity',
+            yAxisField: 'Project',
+            xAxisValues: undefined,
+            yAxisValues: undefined,
+            includeXTotal: true,
+            includeYTotal: true,
+            gridFilter: '',
+            includeBlanks: true,
+            sortBy: 'total',
+            sortDir: 'desc',
+            rowLimit: ''
+        }
+    },
+
+    fieldTypeAttribute: {
+        Project: 'Name',
+        Release: 'Name',
+        Iteration: 'Name',
+        Owner: 'UserName',
+        Tags: "_tagsNameArray",
+        Milestones: "_tagsNameArray",
+        Parent: 'Name',
+        PortfolioItem: 'Name',
+        SubmittedBy: "UserName"
+    },
+
+    totalText: 'Total',
+
+    launch: function() {
+        var settings = this.getSettings();
+        Rally.data.ModelFactory.getModel({
+            type: settings.modelName,
+        }).then({
+            success: function(model) {
+                this.model = model;
+                this._createPivotedStore(this.getSettings());
+            },
+            scope: this
+        });
+    },
+
+    onTimeboxScopeChange: function(newTimeboxScope) {
+        this.callParent(arguments);
+
+        this._createPivotedStore(this.getSettings());
+    },
+
+    _createPivotedStore: function(settings){
+      this.logger.log('_createPivotedStore', settings);
+        var psf = Ext.create('Rally.technicalservices.data.PivotStoreFactory',{
+           modelName: settings.modelName,
+           xAxis: {
+               field: this.getXAxisField(),
+               attributeField: this.getXAxisAttributeField(),
+               values: this.getXAxisValues()
+           },
+           yAxis: {
+               field: this.getYAxisField(),
+               attributeField: this.getYAxisAttributeField(),
+               values: this.getYAxisValues()
+           },
+           includeNone: this.getSetting('includeBlanks'),
+           includeXTotal: this.getSetting('includeXTotal'),
+           includeYTotal: this.getSetting('includeYTotal'),
+           gridFilter: this._getGridFilter(),
+           totalText: this.totalText,
+            sortBy: this.getSetting('sortBy'),
+            sortDir: this.getSetting('sortDir'),
+            rowLimit: this.getSetting('rowLimit')
+        });
+        psf.on('load', this._addGrid, this);
+        psf.on('error', this._showError, this);
+        psf.loadPivotedDataStore();
+    },
+    _getGridFilter: function() {
+        var settingsFilterText = this.getSetting('gridFilter'),
+            timeboxScope = this.getContext().getTimeboxScope(),
+            settingsFilter, filters = [];
+        try {
+            settingsFilter = Rally.data.wsapi.Filter.fromQueryString(settingsFilterText);
+            filters = [settingsFilter];
+        } catch (e) {
+            //ok
+        }
+        
+        if (timeboxScope && timeboxScope.isApplicable(this.model)) {
+            filters.push(timeboxScope.getQueryFilter());
+        }
+        return _.compact(filters);
+    },
+    _showError: function(errorMsg){
+        this.logger.log('_showError', errorMsg);
+    },
+    getXAxisField: function(){
+        return this.getSetting('xAxisField');
+    },
+    getYAxisField: function(){
+        return this.getSetting('yAxisField');
+    },
+    getXAxisValues: function(){
+        return this.getArraySettings('xAxisValues');
+    },
+    getYAxisValues: function(){
+        return this.getArraySettings('yAxisValues');
+    },
+    getArraySettings: function(settingsKey){
+        var vals = this.getSetting(settingsKey);
+        if (!vals){
+            return [];
+        }
+        if (Ext.isString(vals)){
+            return vals.split(',');
+        }
+        return vals;
+    },
+    getXAxisAttributeField: function(){
+        if (this.getXAxisField() === 'State'){
+            var re = new RegExp("^PortfolioItem","i");
+            if (re.test(this.getSetting('modelName'))){
+                return "Name";
+            }
+        }
+        return this.fieldTypeAttribute[this.getXAxisField()] || null;
+    },
+    getYAxisAttributeField: function(){
+        if (this.getYAxisField() === 'State'){
+            var re = new RegExp("^PortfolioItem","i");
+            if (re.test(this.getSetting('modelName'))){
+                return "Name";
+            }
+        }
+
+        return this.fieldTypeAttribute[this.getYAxisField()] || null;
+    },
+    _addGrid: function(store, fields){
+        this.logger.log('_addGrid', store, fields);
+
+        if (this.down('rallygrid')){
+            this.down('rallygrid').destroy();
+        }
+
+        this.add({
+            xtype: 'rallygrid',
+            store: store,
+            columnCfgs: this._getColumns(fields),
+            showPagingToolbar: false,
+            showRowActionsColumn: false
+        });
+
+    },
+    _getColumnDataIndex: function(fieldName) {
+        return fieldName.replace(/\./g, '[dot]').replace(/\"/g, '[quote]');
+    },
+    _getColumns: function(fields){
+        var cols = [],
+            yAxisField = this.getYAxisField(),
+            totalText = this.totalText;
+
+        _.each(fields, function(key) {
+            var align = 'right',
+                flex = 2;
+
+            if (key === yAxisField){
+                align = 'left';
+                flex = 3;
+            }
+            if (key === totalText){
+                flex = 1;
+            }
+
+            cols.push({
+                text: key,
+                dataIndex: this._getColumnDataIndex(key),
+                align: align,
+                flex: flex,
+                renderer: function(v,m,r){
+                    if ((r.get(yAxisField) === totalText) || key === totalText){
+                        m.tdCls = 'totalCls';
+                    }
+                    return v;
+                }
+            });
+        }, this);
+
+        this.logger.log('_getColumns', cols);
+        return cols;
+    },
+    isExternal: function(){
+        return typeof(this.getAppId()) == 'undefined';
+    },
+    getSettingsFields: function(){
+        return Rally.technicalservices.TwoDGridSettings.getFields(this.getSettings());
+    },
+    onSettingsUpdate: function (settings){
+        this.logger.log('onSettingsUpdate',settings);
+        Ext.apply(this, settings);
+        this._createPivotedStore(settings);
+    }
+});
+
+                /*
+ * create a form field thing.
+ */
+
+Ext.define('Rally.technicalservices.MultiValueComboBox',{
+    alias: 'widget.multivaluecombo',
+    extend: 'Ext.form.FieldContainer',
+
+    mixins: {
+        field: 'Ext.form.field.Field'
+    },
+
+    cls: 'multistate',
+
+    config: {
+        /**
+         * @cfg {String}
+         * The label for the field to be passed through to the combobox
+         */
+        fieldLabel: '',
+        modelName: undefined,
+        fieldName: undefined,
+        value: undefined
+    },
+    refreshField: function(fieldName){
+        this.fieldName = fieldName;
+        this._initCombobox();
+    },
+    setModel: function(modelName){
+        this.fieldName = "";
+        this.modelName = modelName;
+        this._initCombobox();
+    },
+    initComponent: function() {
+        this.callParent(arguments);
+
+        this.mixins.field.initField.call(this);
+        this._initCombobox();
+
+    },
+    _initCombobox: function(){
+        if (this.down('rallycombobox')){
+            this.down('rallycombobox').destroy();
+        }
+        if (this.down('rallytagpicker')){
+            this.down('rallytagpicker').destroy();
+        }
+        var me = this;
+
+        if (this.fieldName === 'Tags'){
+            this.add({
+                xtype: 'rallytagpicker'
+            });
+            return;
+        } else {
+            this._addMultiValueComboBox();
+        }
+    },
+    _addMultiValueComboBox: function(){
+        var me = this;
+
+        this.add([{
+            xtype: 'rallycombobox',
+            name: 'valField',
+            plugins: ['rallyfieldvalidationui'],
+            multiSelect: true,
+            emptyText: this.emptyText,
+            displayField: 'name',
+            valueField: 'value',
+            width: this.width,
+            editable: false,
+            submitValue: false,
+            storeType: 'Ext.data.Store',
+            storeConfig: {
+                remoteFilter: false,
+                fields: ['name', 'value'],
+                data: []
+            },
+            listeners: {
+                'change': function(cb,new_value, old_value){
+                    me.currentValue = new_value;
+                }
+            }
+        }]);
+
+        if (this.modelName && this.fieldName){
+            this._loadValues();
+        }
+    },
+    _loadValues: function() {
+        console.log('_loadValues', this.modelName, this.fieldName);
+        Rally.technicalservices.WsapiToolbox.fetchAllowedValues(this.modelName,this.fieldName).then({
+            scope: this,
+            success: function(value_names) {
+
+                var values = Ext.Array.map(value_names,function(value_name){
+                    return { 'name': value_name || 'None', 'value': value_name };
+                });
+
+                var combobox = this.down('rallycombobox');
+                combobox.getStore().loadData(values);
+
+                var current_values = this.getValue();
+                console.log('current values:', current_values);
+
+                if ( current_values && !Ext.isArray(current_values) ) {
+                    current_values = current_values.split(',');
+                }
+                combobox.setValue(current_values);
+                this.fireEvent('ready',this);
+
+            },
+            failure: function(msg) {
+                Ext.Msg.alert('Problem Retrieving States', msg);
+            }
+        });
+    },
+
+    getSubmitData: function() {
+        var data = {};
+        if (this.down('rallytagpicker')){
+            var vals = [];
+            _.each(this.down('rallytagpicker').getValue(), function(tag){
+                vals.push(tag.get('Name'));
+            });
+            data[this.name] = vals;
+        } else {
+            data[this.name] = this.currentValue;
+        }
+
+        return data;
+    }
+});
+                
+Ext.override(Rally.ui.combobox.FieldComboBox,{
+
+    blackListFields: [],
+    whiteListFields: [],
+    allowedTypes: [],
+    constrained: true,
+
+    constructor: function(config) {
+
+        this.blackListFields = config.blackListFields || [];
+        this.whiteListFields = config.whiteListFields || [];
+        this.allowedTypes = config.allowedTypes || [];
+        this.constrained = config.constrained || false;
+
+        this.mergeConfig(config);
+
+        this.store = Ext.create('Ext.data.Store', {
+            fields: [this.valueField, this.displayField, 'fieldDefinition'],
+            data: []
+        });
+
+        return this.callParent([this.config]);
+    },
+    _populateStore: function() {
+        if (!this.store) {
+            return;
+        }
+        var data = _.sortBy(
+            _.map(
+                _.filter(this.model.getFields(), this._isNotHidden, this),
+                this._convertFieldToLabelValuePair,
+                this
+            ),
+            'name'
+        );
+
+        this.store.loadRawData(data);
+        this.setDefaultValue();
+        this.onReady();
+    },
+    _isNotHidden: function(field) {
+        console.log('_isNotHidden', field,this.allowedTypes);
+        var showField = false;
+
+        if (!field.hidden && field.attributeDefinition){
+            if (Ext.Array.contains(this.allowedTypes, field.attributeDefinition.AttributeType)){
+                showField = true;
+            }
+
+            if (Ext.Array.contains(this.blackListFields, field.name)){
+                showField = false;
+            }
+
+            if (this.constrained === true && field.attributeDefinition.Constrained !== true){
+                showField = false;
+            }
+
+            if (Ext.Array.contains(this.whiteListFields, field.name)){
+                showField = true;
+            }
+        }
+
+        return showField;
+    }
+});
+                Ext.define('Rally.technicalservices.data.PivotStoreFactory',{
+
+    mixins: {
+        observable: 'Ext.util.Observable'
+    },
+
+    logger: new Rally.technicalservices.Logger(),
+
+    xAxis: {
+        field: undefined,
+        attributeField: undefined,
+        values: undefined
+    },
+
+    yAxis: {
+        field: undefined,
+        attributeField: undefined,
+        values: undefined
+    },
+
+    noneText: "-- No Entry --",
+    totalField: 'total',
+    totalText: 'Total',
+    includeXTotal: true,
+    includeYTotal: true,
+    includeNone: true,
+
+    constructor: function (config) {
+        Ext.apply(this,config);
+        this.logger.log('Pivot constructor', this, config);
+        // The Observable constructor copies all of the properties of `config` on
+        // to `this` using Ext.apply. Further, the `listeners` property is
+        // processed to add listeners.
+        //
+        this.mixins.observable.constructor.call(this, config);
+    },
+    getFetchFields: function(){
+        var xAxisField = this.xAxis && this.xAxis.field || null,
+            yAxisField = this.yAxis && this.yAxis.field || null,
+            attributeFields = [];
+
+        if (this.xAxis && this.xAxis.attributeField) {attributeFields.push(this.xAxis.attributeField);}
+        if (this.yAxis && this.yAxis.attributeField) {attributeFields.push(this.yAxis.attributeField);}
+
+        return [xAxisField, yAxisField].concat(attributeFields);
+
+    },
+    getFilters: function(){
+        return this.gridFilter || [];
+    },
+    getSorters: function(direction){
+
+        var sorterProperty = this.xAxis && this.xAxis.field;
+        if (sorterProperty && this.xAxis.attributeField){
+            sorterProperty = sorterProperty + '.' + this.xAxis.attributeField;
+        }
+
+        return [{
+            property: sorterProperty,
+            direction: direction || "ASC"
+        }];
+    },
+    fetchXAxisFields: function(){
+        var deferred = Ext.create('Deft.Deferred'),
+            modelName = this.modelName,
+            xAxisField = this.xAxis.field,
+            noneText = this.noneText,
+            includeNone = this.includeNone,
+            includeTotal = this.includeXTotal,
+            totalField = this.totalText,
+            xAxisValues = this.xAxis.values || [];
+
+        Rally.data.ModelFactory.getModel({
+            type: modelName,
+            success: function(model) {
+                model.getField(xAxisField).getAllowedValueStore().load({
+                    callback: function(records, operation, success) {
+                        var allowedValues = [];
+
+                        _.each(records, function(allowedValue) {
+                            var val = allowedValue.get('StringValue');
+                            if (val && (Ext.Array.contains(xAxisValues, val) || xAxisValues.length ===0)) {
+                                allowedValues.push(val);
+                            }
+                        }, this);
+
+                        //include/disclude none
+                        if (includeNone){
+                            allowedValues.push(noneText);
+                        }
+                        //include/disclude total
+                        if (includeTotal){
+                            allowedValues.push(totalField);
+                        }
+
+                        deferred.resolve(allowedValues);
+                    }
+                });
+            },
+            scope: this
+        });
+        return deferred;
+    },
+    fetchRecords: function(){
+        var deferred = Ext.create('Deft.Deferred');
+
+        var store = Ext.create('Rally.data.wsapi.Store', {
+            model: this.modelName,
+            fetch: this.getFetchFields(),
+            filters: this.getFilters(),
+            limit: 'Infinity',
+            sorters: this.getSorters(),
+            pageSize: 2000,
+            listeners: {
+                beforeload: function() {
+                    //this.getProxy().getReader().useSimpleAccessors = true;
+                }
+            }
+        });
+        return store.load({
+            callback: function(records, operation, success){
+                this.logger.log('fetchRecords load', records, operation, success);
+                var collectionField = this.getCollectionField();
+                if (false){ //We don't need this for tags, because we have the _tagsNameArray attribute but might if we add other collection fields
+                //if (collectionField && collectionField.length > 0){
+                    return this.fetchCollectionValues(records, collectionField);
+                } else {
+                    deferred.resolve(records);
+                }
+            },
+            scope: this
+        });
+    },
+    fetchCollectionValues: function(records, collectionField){
+        var deferred = Ext.create('Deft.Deferred'),
+            me = this,
+            promises = [];
+
+        _.each(records, function(r){
+            if (r.get(collectionField) && r.get(collectionField).Count > 0){
+                promises.push(this.fetchCollection(r, collectionField));
+            } else {
+                r.set(collectionField + 'Array', []);
+            }
+        }, this);
+
+        if (promises.length > 0){
+            Deft.Promise.all(promises).then({
+                success: function(){
+                    me.logger.log('fetchCollectionValues', records);
+                    deferred.resolve(records);
+                }
+            });
+        } else {
+            deferred.resolve(records);
+        }
+
+        return deferred;
+    },
+    fetchCollection: function(record, fieldName){
+        var deferred = Ext.create('Deft.Deferred');
+
+        record.getCollection(fieldName).load({
+            callback: function(records, operation, success){
+                var collectionNames = [];
+                _.each(records, function(r){
+                    collectionNames.push(r.get('Name'));
+                });
+                record.set(fieldName + 'Array', collectionNames);
+                console.log('record.set', fieldName, collectionNames, record);
+                deferred.resolve();
+            }
+        });
+
+        return deferred;
+    },
+    getCollectionField: function(){
+        if (this.yAxis.field === 'Tags'){
+            return "Tags";
+        }
+        return null;
+    },
+    loadPivotedDataStore: function(){
+
+        Deft.Promise.all([this.fetchRecords(),this.fetchXAxisFields()]).then({
+            success: function(results){
+                this.logger.log('loadPivotedDataStore success', results);
+                var records = results[0],
+                    xAxisFields = results[1],
+                    yAxisFields = [this.yAxis.field],
+                    store = this.getPivotedDataStore(records, xAxisFields);
+
+                this.fireEvent('load', store, yAxisFields.concat(xAxisFields));
+            },
+            failure: function(msg){
+                this.fireEvent('error', msg);
+            },
+            scope: this
+        });
+
+    },
+    _initializeDataHash: function(yValues, xAxisFields, includeXTotal,includeYTotal){
+        var hash = {},
+            yAxisField = this.yAxis.field;
+
+        _.each(yValues, function(y){
+            hash[y] = this._initializeRow(yAxisField, y, xAxisFields, includeXTotal);
+        },this);
+
+
+        this.logger.log('_inititalizeDataHash', hash);
+        return hash;
+    },
+    getPivotedDataStore: function(records, xAxisFields){
+
+        this.logger.log('getPivotedDataStore',xAxisFields);
+
+        var xAxis = this.xAxis,
+            yAxis = this.yAxis,
+            xAxisField = xAxis && xAxis.field,
+            yAxisField = yAxis && yAxis.field,
+            xAxisAttributeField = xAxis && xAxis.attributeField,
+            yAxisAttributeField = yAxis && yAxis.attributeField,
+            fields = [yAxisField].concat(xAxisFields),
+            includeYTotal= this.includeYTotal,
+            includeXTotal= this.includeXTotal,
+            xValues =  xAxisFields,  //we take care of filtering out xAxisValues in the getXAxisFields function
+            yValues = this.yAxis.values || [],
+            totalText = this.totalText,
+            totalRow =  this._initializeRow(yAxisField, totalText, xAxisFields, includeXTotal),
+            dataHash = this._initializeDataHash(yValues, xValues,includeXTotal,includeYTotal);
+
+            _.each(records, function(r){
+                var xVal = xAxisAttributeField && r.get(xAxisField) ? r.get(xAxisField)[xAxisAttributeField] : r.get(xAxisField) || this.noneText,
+                    yVal = yAxisAttributeField && r.get(yAxisField)? r.get(yAxisField)[yAxisAttributeField] : r.get(yAxisField) || this.noneText;
+
+                if (!xVal || xVal.length === 0){
+                    xVal = this.noneText;
+                }
+
+                var includedYVals = [];
+                if (yAxisAttributeField === '_tagsNameArray'){ //_tagsNameArray
+                    includedYVals = _.map(yVal, function(y){
+                        return y.Name;
+                    });
+                    if (yValues.length > 0){
+                        includedYVals = Ext.Array.intersect(includedYVals, yValues);
+                    }
+                } else {
+                    if (Ext.Array.contains(yValues, yVal) || yValues.length === 0) {
+                        includedYVals.push(yVal);
+                    }
+                }
+
+                _.each(includedYVals, function(y){
+                    if (!dataHash[y]){
+                        dataHash[y] = this._initializeRow(yAxisField, y, xAxisFields, includeXTotal);
+                    }
+                    if (Ext.Array.contains(xValues, xVal) || xValues.length === 0){
+                        dataHash[y][xVal] = dataHash[y][xVal] + 1;
+                        if (includeXTotal) {
+                            dataHash[y][totalText] = dataHash[y][totalText] + 1;
+                        }
+                        if (includeYTotal){
+                            totalRow[xVal] =  totalRow[xVal] + 1;
+                            totalRow[totalText] = totalRow[totalText] + 1;
+                        }
+                    }
+                }, this);
+
+            }, this);
+
+        if (includeYTotal) {
+            dataHash[this.totalText] = totalRow;
+        }
+
+        var sortField = yAxisField;
+        if (this.sortBy === 'total'){
+            sortField = this.totalText;
+        }
+
+        var data = this._getSortedData(dataHash, sortField, this.sortDir, this.rowLimit, this.totalText, yAxisField);
+        //Need to create a convert function to work around a bug where
+        //data has . in the property names
+        var me = this;
+        var modelFields = _.map(fields, function(field) { 
+            return { 
+                name: me._getFieldName(field), 
+                mapping: false, 
+                convert: function(val, record) {
+                    return record.raw[me._getDataName(this.name)];
+                }
+            };
+        });
+        return Ext.create('Rally.data.custom.Store',{
+            fields: modelFields,
+            data: data,
+            remoteSort: false,
+            pageSize: data.length 
+        });
+    },
+    _getFieldName: function(fieldName) {
+        return fieldName.replace(/\./g, '[dot]').replace(/\"/g, '[quote]');
+    },
+    _getDataName: function(fieldName) {
+        return fieldName.replace(/\[dot\]/g, '.').replace(/\[quote\]/g, '"');
+    },
+    _getSortedData: function(dataHash, sortField, sortDir, rowLimit, totalText, nameField){
+        var totalData = dataHash[totalText];
+        delete dataHash[totalText];
+        var data = _.values(dataHash),
+            sortMultiplier = sortDir.toLowerCase() === 'asc' ? -1 : 1,
+            sortedData = Ext.Array.sort(data, function(a,b){
+                if (b[nameField] === totalText){
+                    return -1;
+                }
+                if (a[sortField] < b[sortField])
+                    return sortMultiplier;
+                if (a[sortField] > b[sortField])
+                    return -1 * sortMultiplier;
+                return 0;
+            });
+        sortedData.push(totalData);
+
+        if (rowLimit && rowLimit > 0){
+            var truncatedData = Ext.Array.slice(sortedData,0,rowLimit);
+            if (rowLimit < sortedData.length && dataHash[totalText]){
+                //now we need to recalculate the total row and add it back in...
+                var totalRow = {};
+                totalRow[nameField] = totalText;
+                _.each(truncatedData, function(rec){
+                    _.each(rec, function(val, key){
+                        if (key !== nameField){
+                            totalRow[key] = (totalRow[key] || 0) + val;
+                        }
+                    });
+                });
+                truncatedData.push(totalRow);
+            }
+            return truncatedData;
+        }
+        return sortedData;
+    },
+    _initializeRow: function(yAxisField, yVal, xAxisFields, includeXTotal){
+        var row = {};
+        row[yAxisField] = yVal;
+
+        if (includeXTotal){
+            row.total = 0;
+        }
+
+        _.each(xAxisFields, function(f){
+            row[f]=0;
+        });
+        return row;
+    }
+});
+
+                Ext.define('Rally.technicalservices.TwoDGridSettings',{
+    singleton: true,
+
+    getFields: function(config){
+
+        var sortBy = config.sortBy || 'alpha',
+            sortDir = config.sortDir || 'desc';
+
+        var width = 150;
+        var settings = [{
+            xtype: 'rallycombobox',
+            name: 'modelName',
+            fieldLabel: 'Artifact Type',
+            labelWidth: width,
+            labelAlign: 'right',
+            bubbleEvents: ['change'],
+            valueField: 'TypePath',
+            value: config.modelName,
+            storeConfig: {
+                model: 'TypeDefinition',
+                remoteSort: true,
+                remoteFilter: true,
+                filters: [{
+                    property: 'Creatable',
+                    value: true
+                },{
+                    property: 'Deletable',
+                    value: true
+                },{
+                    property: 'Restorable',
+                    value: true
+                },{
+                    property: 'Name',
+                    operator: '!=',
+                    value: 'Milestone'
+                }]
+            }
+        },{
+            xtype: 'rallyfieldcombobox',
+            model: config.modelName,
+            name: 'xAxisField',
+            fieldLabel: 'X Axis Field',
+            labelWidth: width,
+            labelAlign: 'right',
+            blackListFields: [],
+            whiteListFields: ['Release','Iteration','ScheduleState','State'],
+            allowedTypes: ['STRING','RATING'],
+            constrained: true,
+            bubbleEvents: ['change'],
+            value: config.xAxisField,
+            handlesEvents: {
+                change: function(cb) {
+                    if (cb.name === 'modelName'){
+                        this.refreshWithNewModelType(cb.getRecord().get('TypePath'));
+                    }
+                }
+            }
+        },{
+            name: 'xAxisValues',
+            xtype: 'multivaluecombo',
+            readyEvent: 'ready',
+            labelWidth: width,
+            labelAlign: 'right',
+            width: 500,
+            modelName: config.modelName,
+            fieldName: null,
+            emptyText: 'Choose field values to limit columns or leave blank to show all values...',
+            fieldLabel: 'X Axis Values',
+            handlesEvents: {
+                change: function(cb) {
+                    if (cb.name === 'modelName'){
+                        this.setModel(cb.getRecord().get('TypePath'));
+                    }
+                    if (cb.name === 'xAxisField'){
+                        this.refreshField(cb.getValue());
+                        this.currentValue = '';
+                    }
+                }
+            }
+        },{
+            xtype: 'rallyfieldcombobox',
+            model: config.modelName,
+            name: 'yAxisField',
+            labelAlign: 'right',
+            fieldLabel: 'Y Axis Field',
+            labelWidth: width,
+            blackListFields: [],
+            whiteListFields: ['Release','Iteration','Project','ScheduleState','State','Owner','SubmittedBy','Tags','Parent','PortfolioItem','Milestones'],
+            allowedTypes: ['STRING','RATING'],
+            constrained: true,
+            bubbleEvents: ['change'],
+            value: config.yAxisField,
+            handlesEvents: {
+                change: function(cb) {
+                    if (cb.name === 'modelName'){
+                        this.refreshWithNewModelType(cb.getRecord().get('TypePath'));
+                    }
+                }
+            }
+        },{
+            name: 'yAxisValues',
+            xtype: 'multivaluecombo',
+            //margin: '0 0 25 10',
+            readyEvent: 'ready',
+            labelWidth: width,
+            labelAlign: 'right',
+            width: 500,
+            modelName: config.modelName,
+            fieldName: null,
+            fieldLabel: 'Y Axis Values',
+            emptyText: 'Choose field values to limit rows or leave blank to show all values...',
+            handlesEvents: {
+                change: function(cb) {
+                    if (cb.name === 'modelName'){
+                        this.setModel(cb.getRecord().get('TypePath'));
+                    }
+                    if (cb.name === 'yAxisField'){
+                        this.refreshField(cb.getValue());
+                        this.currentValue = '';
+                    }
+                }
+            }
+        },{
+            xtype: 'rallycheckboxfield',
+            fieldLabel: 'Include Blanks',
+            value: config.includeBlanks,
+            name: 'includeBlanks',
+            labelAlign: 'right',
+            labelWidth: width
+        },{
+            xtype: 'rallycheckboxfield',
+            fieldLabel: 'Include Row Totals',
+            value: config.includeXTotal,
+            name: 'includeXTotal',
+            labelAlign: 'right',
+            labelWidth: width
+        },{
+            xtype: 'rallycheckboxfield',
+            fieldLabel: 'Include Column Totals',
+            value: config.includeYTotal,
+            name: 'includeYTotal',
+            labelAlign: 'right',
+            labelWidth: width
+        },{
+            xtype: 'radiogroup',
+            fieldLabel: 'Sort By',
+            columns: 1,
+            vertical: true,
+            labelWidth: width,
+            labelAlign: 'right',
+            items: [{
+                boxLabel: "Alphabetical",
+                name: 'sortBy',
+                inputValue: 'alpha',
+                checked: sortBy === 'alpha'
+            },{
+                boxLabel: "Total",
+                name: 'sortBy',
+                inputValue: 'total',
+                checked: sortBy === 'total'
+            }]
+        },{
+            xtype: 'radiogroup',
+            fieldLabel: 'Sort Direction',
+            columns: 1,
+            vertical: true,
+            labelWidth: width,
+            labelAlign: 'right',
+            items: [{
+                boxLabel: "Descending",
+                name: 'sortDir',
+                inputValue: 'desc',
+                checked: sortDir === 'desc'
+            },{
+                boxLabel: "Ascending",
+                name: 'sortDir',
+                inputValue: 'asc',
+                checked: sortDir === 'asc'
+            }]
+        },{
+            xtype: 'rallynumberfield',
+            fieldLabel: 'Total Rows to Display (Blank for no limit)',
+            name: 'rowLimit',
+            labelWidth: width,
+            labelAlign: 'right',
+            minValue: 1,
+            allowBlank: true,
+            value: config.rowLimit
+        },{
+            xtype: 'textarea',
+            fieldLabel: 'Query',
+            name: 'gridFilter',
+            anchor: '100%',
+            cls: 'query-field',
+            margin: '0 70 0 0',
+            labelAlign: 'right',
+            labelWidth: width,
+            plugins: [
+                {
+                    ptype: 'rallyhelpfield',
+                    helpId: 194
+                },
+                'rallyfieldvalidationui'
+            ],
+            validateOnBlur: false,
+            validateOnChange: false,
+            validator: function(value) {
+                try {
+                    if (value) {
+                        Rally.data.wsapi.Filter.fromQueryString(value);
+                    }
+                    return true;
+                } catch (e) {
+                    return e.message;
+                }
+            }
+        }];
+        return settings;
+    }
+});
+
+                Ext.define('Rally.technicalservices.WsapiToolbox',{
+    singleton: true,
+    fetchWsapiCount: function(model, query_filters){
+        var deferred = Ext.create('Deft.Deferred');
+
+        Ext.create('Rally.data.wsapi.Store',{
+            model: model,
+            fetch: ['ObjectID'],
+            filters: query_filters,
+            limit: 1,
+            pageSize: 1
+        }).load({
+            callback: function(records, operation, success){
+                if (success){
+                    deferred.resolve(operation.resultSet.totalRecords);
+                } else {
+                    deferred.reject(Ext.String.format("Error getting {0} count for {1}: {2}", model, query_filters.toString(), operation.error.errors.join(',')));
+                }
+            }
+        });
+        return deferred;
+    },
+
+    fetchWsapiRecords: function(model, query_filters, fetch_fields){
+        var deferred = Ext.create('Deft.Deferred');
+
+        var store = Ext.create('Rally.data.wsapi.Store',{
+            model: model,
+            fetch: fetch_fields,
+            filters: query_filters,
+            limit: Infinity
+        }).load({
+            callback: function(records, operation, success){
+                if (success){
+                    deferred.resolve(records);
+                } else {
+                    deferred.reject(Ext.String.format("Error getting {0} for {1}: {2}", model, query_filters.toString(), operation.error.errors.join(',')));
+                }
+            }
+        });
+        return deferred;
+    },
+    fetchReleases: function(timebox){
+
+        var deferred = Ext.create('Deft.Deferred'),
+            rec = timebox.getRecord(),
+            me = this;
+
+        if (rec == null) {
+            deferred.resolve([]);
+        }
+
+        Ext.create('Rally.data.wsapi.Store',{
+            model: 'Release',
+            fetch: ['ObjectID'],
+            filters: [{
+                property: 'Name',
+                value: rec.get('Name')
+            },{
+                property: 'ReleaseStartDate',
+                value: rec.get('ReleaseStartDate')
+            },{
+                property: 'ReleaseDate',
+                value: rec.get('ReleaseDate')
+            }],
+            limit: Infinity
+        }).load({
+            callback: function(records, operation, success){
+                if (success){
+                    deferred.resolve(records);
+                }   else {
+                    deferred.reject("Error loading Releases: " + operation.error.errors.join(','));
+                }
+            }
+        });
+        return deferred;
+    },
+
+    fetchAllowedValues: function(model,field_name) {
+        var deferred = Ext.create('Deft.Deferred');
+
+        Rally.data.ModelFactory.getModel({
+            type: model,
+            success: function(model) {
+                model.getField(field_name).getAllowedValueStore().load({
+                    callback: function(records, operation, success) {
+                        var values = Ext.Array.map(records, function(record) {
+                            return record.get('StringValue');
+                        });
+                        deferred.resolve(values);
+                    }
+                });
+            },
+            failure: function(msg) { deferred.reject('Error loading field values: ' + msg); }
+        });
+
+        return deferred;
+
+    }
+});
+
+            Rally.launchApp('2d-matrix-grid', {
+                name:"2D Matrix Grid",
+                parentRepos:"",
+                version:"0.2.6"
+            });
+
+        });
+    </script>
+
+
+
+    <style type="text/css">
+        .tsinfolink {
+  position: absolute;
+  right: 0px;
+  width: 14px;
+  height: 14px;
+  border-radius: 7px;
+  text-align: center;
+  color: white;
+  background: #C0C0C0;
+  border-style: solid;
+  border-width: 1px;
+  margin-top: 25px;
+  margin-right: 5px;
+  cursor: pointer;
+}
+.totalCls {
+  font-weight: bold;
+  color: #666666;
+  font-style: italic;
+}
+
+    </style>
+</head>
+<body>
+</body>
+</html>

@@ -1,0 +1,19 @@
+{
+    "name": "2D Matrix Grid",
+    "className": "2d-matrix-grid",
+    "server": "https://rally1.rallydev.com",
+    "sdk": "2.1",
+    "javascript": [
+        "src/javascript/__ts-info-link.js",
+        "src/javascript/__ts-logger.js",
+        "src/javascript/app.js",
+        "src/javascript/mult-value-combo.js",
+        "src/javascript/overrides.js",
+        "src/javascript/pivot.js",
+        "src/javascript/settings.js",
+        "src/javascript/wsapi-toolbox.js"
+    ],
+    "css": [
+        "src/style/app.css"
+    ]
+}
